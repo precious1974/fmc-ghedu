@@ -9,11 +9,9 @@ import {
   Film,
   Image as ImageIcon,
   Search,
-  Trash2,
   Upload,
   X,
 } from 'lucide-react';
-import {DeleteConfirmModal} from './components/DeleteConfirmModal';
 import {FilePreviewModal} from './components/FilePreviewModal';
 import type {FileCategory, FileListResponse, StoredFileItem} from './types/files';
 import {formatBytes, formatDate} from './utils/format';
@@ -66,8 +64,6 @@ export default function App() {
 
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [previewTarget, setPreviewTarget] = useState<StoredFileItem | null>(null);
-  const [deleteTargets, setDeleteTargets] = useState<StoredFileItem[]>([]);
-  const [deleting, setDeleting] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const dragDepthRef = useRef(0);
@@ -76,7 +72,8 @@ export default function App() {
     try {
       const response = await fetch('/api/files');
       if (!response.ok) {
-        throw new Error('Could not load your files.');
+        const body = (await response.json().catch(() => null)) as {error?: string} | null;
+        throw new Error(body?.error || 'Could not load stored files.');
       }
       const data: FileListResponse = await response.json();
       setFiles(data.files);
@@ -91,7 +88,7 @@ export default function App() {
         return next;
       });
     } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : 'Could not load your files.');
+      setErrorMessage(err instanceof Error ? err.message : 'Could not load stored files.');
     } finally {
       setLoading(false);
     }
@@ -150,8 +147,8 @@ export default function App() {
               setFiles((prev) => [...uploaded, ...prev]);
               setNoticeMessage(
                 uploaded.length === 1
-                  ? `Uploaded "${uploaded[0].originalName}".`
-                  : `Uploaded ${uploaded.length} files.`,
+                  ? `Stored "${uploaded[0].originalName}" permanently.`
+                  : `Stored ${uploaded.length} files permanently.`,
               );
             } else {
               void fetchFiles();
@@ -299,53 +296,6 @@ export default function App() {
     });
   };
 
-  const handleConfirmDelete = async () => {
-    if (deleteTargets.length === 0) {
-      return;
-    }
-    setDeleting(true);
-    setErrorMessage(null);
-
-    const idsToDelete = deleteTargets.map((item) => item.id);
-    const failedIds: string[] = [];
-
-    for (const id of idsToDelete) {
-      try {
-        const res = await fetch(`/api/files/${encodeURIComponent(id)}`, {
-          method: 'DELETE',
-        });
-        if (!res.ok) {
-          failedIds.push(id);
-        }
-      } catch {
-        failedIds.push(id);
-      }
-    }
-
-    const deletedSet = new Set(idsToDelete.filter((id) => !failedIds.includes(id)));
-    setFiles((prev) => prev.filter((item) => !deletedSet.has(item.id)));
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      deletedSet.forEach((id) => next.delete(id));
-      return next;
-    });
-
-    if (previewTarget && deletedSet.has(previewTarget.id)) {
-      setPreviewTarget(null);
-    }
-
-    if (failedIds.length > 0) {
-      setErrorMessage(`Could not delete ${failedIds.length} file(s). Please try again.`);
-    } else if (deletedSet.size > 0) {
-      setNoticeMessage(
-        deletedSet.size === 1 ? 'File deleted.' : `Deleted ${deletedSet.size} files.`,
-      );
-    }
-
-    setDeleting(false);
-    setDeleteTargets([]);
-  };
-
   const openFilePicker = () => {
     if (uploadProgress === null) {
       fileInputRef.current?.click();
@@ -471,7 +421,7 @@ export default function App() {
                   {isDragging ? 'Drop files to upload' : 'Drop files here or click to browse'}
                 </h1>
                 <p className="mt-1 text-sm text-zinc-500">
-                  Upload any file type up to 100 MB per file, then preview or download anytime.
+                  Uploaded files are stored permanently for preview and download anytime.
                 </p>
               </>
             )}
@@ -575,15 +525,14 @@ export default function App() {
                     className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-800 transition-colors hover:bg-zinc-50 whitespace-nowrap shrink-0"
                   >
                     <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                    Download
+                    Download Selected
                   </button>
                   <button
                     type="button"
-                    onClick={() => setDeleteTargets(selectedFiles)}
-                    className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-700 transition-colors hover:bg-red-50 whitespace-nowrap shrink-0"
+                    onClick={() => setSelectedIds(new Set())}
+                    className="inline-flex min-h-[36px] items-center rounded-lg px-2.5 py-1.5 text-xs font-medium text-zinc-500 transition-colors hover:text-zinc-900 whitespace-nowrap shrink-0"
                   >
-                    <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-                    Delete
+                    Clear
                   </button>
                 </div>
               ) : (
@@ -632,7 +581,7 @@ export default function App() {
                 <p className="mt-1 text-sm text-zinc-500">
                   {hasActiveFilters
                     ? 'Try clearing your search query or switching to All Files.'
-                    : 'Upload your first file above to store and download it here.'}
+                    : 'Upload your first file above to store it permanently for download.'}
                 </p>
                 {hasActiveFilters ? (
                   <button
@@ -727,7 +676,7 @@ export default function App() {
                             {formatDate(file.uploadedAt)}
                           </td>
                           <td className="px-4 py-2.5 text-right">
-                            <div className="inline-flex items-center justify-end gap-1">
+                            <div className="inline-flex items-center justify-end gap-1.5">
                               {file.previewable && (
                                 <button
                                   type="button"
@@ -748,15 +697,6 @@ export default function App() {
                                 <Download className="h-3.5 w-3.5" aria-hidden="true" />
                                 <span className="hidden sm:inline">Download</span>
                               </button>
-                              <button
-                                type="button"
-                                onClick={() => setDeleteTargets([file])}
-                                aria-label={`Delete ${file.originalName}`}
-                                title="Delete"
-                                className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-zinc-400 transition-colors hover:bg-red-50 hover:text-red-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600"
-                              >
-                                <Trash2 className="h-4 w-4" aria-hidden="true" />
-                              </button>
                             </div>
                           </td>
                         </tr>
@@ -774,13 +714,6 @@ export default function App() {
         file={previewTarget}
         onClose={() => setPreviewTarget(null)}
         onDownload={triggerDownload}
-      />
-
-      <DeleteConfirmModal
-        targets={deleteTargets}
-        deleting={deleting}
-        onCancel={() => setDeleteTargets([])}
-        onConfirm={handleConfirmDelete}
       />
     </div>
   );

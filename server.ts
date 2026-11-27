@@ -1,32 +1,33 @@
+import 'dotenv/config';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
+import {createClient, type SupabaseClient} from '@supabase/supabase-js';
 import express, {type NextFunction, type Request, type Response} from 'express';
 import multer from 'multer';
 
 const PORT = 3000;
 const MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024; // 100 MB per file
 const MAX_FILES_PER_UPLOAD = 20;
-
-const STORAGE_DIR = path.resolve(process.cwd(), 'storage');
-const UPLOAD_DIR = path.resolve(STORAGE_DIR, 'uploads');
-const INDEX_PATH = path.resolve(STORAGE_DIR, 'index.json');
+const BUCKET_NAME = 'pocketvault-files';
+const TEMP_UPLOAD_DIR = path.resolve(os.tmpdir(), 'pocketvault-uploads');
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 type FileCategory = 'documents' | 'images' | 'media' | 'archives' | 'other';
 
-interface InternalFileRecord {
+interface DbFileRow {
   id: string;
-  storedName: string;
-  originalName: string;
+  original_name: string;
+  storage_path: string;
   extension: string;
   size: number;
-  mimeType: string;
+  mime_type: string;
   category: FileCategory;
-  uploadedAt: string;
   previewable: boolean;
+  uploaded_at: string;
 }
 
 const SAFE_IMAGE_PREVIEW_MIMES = new Set([
@@ -43,43 +44,31 @@ const SAFE_TEXT_PREVIEW_MIMES = new Set([
   'application/json',
 ]);
 
-function ensureStorageDirs(): void {
-  fs.mkdirSync(UPLOAD_DIR, {recursive: true});
-  if (!fs.existsSync(INDEX_PATH)) {
-    fs.writeFileSync(INDEX_PATH, '[]', 'utf8');
+fs.mkdirSync(TEMP_UPLOAD_DIR, {recursive: true});
+
+let cachedClient: SupabaseClient | null = null;
+let cachedKeySignature = '';
+
+function getSupabaseClient(): SupabaseClient | null {
+  const url = process.env.SUPABASE_URL?.trim();
+  const key = (process.env.SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY)?.trim();
+
+  if (!url || !key) {
+    return null;
   }
-}
 
-ensureStorageDirs();
-
-let indexQueue: Promise<void> = Promise.resolve();
-
-function runSerialized<T>(task: () => Promise<T>): Promise<T> {
-  const next = indexQueue.then(task, task);
-  indexQueue = next.then(
-    () => undefined,
-    () => undefined,
-  );
-  return next;
-}
-
-async function readIndex(): Promise<InternalFileRecord[]> {
-  try {
-    const raw = await fsp.readFile(INDEX_PATH, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-    return parsed as InternalFileRecord[];
-  } catch {
-    return [];
+  const signature = `${url}|${key}`;
+  if (!cachedClient || cachedKeySignature !== signature) {
+    cachedClient = createClient(url, key, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+      },
+    });
+    cachedKeySignature = signature;
   }
-}
 
-async function writeIndex(records: InternalFileRecord[]): Promise<void> {
-  const tempPath = path.resolve(STORAGE_DIR, `index.${crypto.randomUUID()}.tmp`);
-  await fsp.writeFile(tempPath, JSON.stringify(records, null, 2), 'utf8');
-  await fsp.rename(tempPath, INDEX_PATH);
+  return cachedClient;
 }
 
 function sanitizeOriginalFilename(rawName: string): string {
@@ -87,7 +76,7 @@ function sanitizeOriginalFilename(rawName: string): string {
   if (!base || base === '.' || base === '..') {
     return 'untitled';
   }
-  return base.slice(0, 180);
+  return base.slice(0, 255);
 }
 
 function inferCategory(mimeType: string, extension: string): FileCategory {
@@ -137,27 +126,16 @@ function isPreviewable(mimeType: string, extension: string): boolean {
   return false;
 }
 
-function resolveSafeUploadPath(storedName: string): string | null {
-  if (!storedName || storedName.includes('/') || storedName.includes('\\')) {
-    return null;
-  }
-  const resolved = path.resolve(UPLOAD_DIR, storedName);
-  if (!resolved.startsWith(UPLOAD_DIR + path.sep)) {
-    return null;
-  }
-  return resolved;
-}
-
-function toPublicItem(record: InternalFileRecord) {
+function toPublicItem(row: DbFileRow) {
   return {
-    id: record.id,
-    originalName: record.originalName,
-    extension: record.extension,
-    size: record.size,
-    mimeType: record.mimeType,
-    category: record.category,
-    uploadedAt: record.uploadedAt,
-    previewable: record.previewable,
+    id: row.id,
+    originalName: row.original_name,
+    extension: row.extension,
+    size: Number(row.size),
+    mimeType: row.mime_type,
+    category: row.category,
+    uploadedAt: row.uploaded_at,
+    previewable: row.previewable,
   };
 }
 
@@ -169,8 +147,8 @@ function buildContentDisposition(filename: string, disposition: 'attachment' | '
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => {
-    ensureStorageDirs();
-    cb(null, UPLOAD_DIR);
+    fs.mkdirSync(TEMP_UPLOAD_DIR, {recursive: true});
+    cb(null, TEMP_UPLOAD_DIR);
   },
   filename: (_req, _file, cb) => {
     cb(null, crypto.randomUUID());
@@ -190,181 +168,262 @@ async function startServer(): Promise<void> {
   app.disable('x-powered-by');
   app.use(express.json());
 
-  app.get('/api/health', (_req: Request, res: Response) => {
-    res.json({ok: true});
+  app.get('/api/health', async (_req: Request, res: Response) => {
+    const supabase = getSupabaseClient();
+    if (!supabase) {
+      res.status(503).json({ok: false, configured: false, database: false, storage: false});
+      return;
+    }
+
+    const [dbCheck, storageCheck] = await Promise.all([
+      supabase.from('files').select('id', {count: 'exact', head: true}),
+      supabase.storage.from(BUCKET_NAME).list('', {limit: 1}),
+    ]);
+
+    const databaseOk = !dbCheck.error;
+    const storageOk = !storageCheck.error;
+
+    res.status(databaseOk && storageOk ? 200 : 502).json({
+      ok: databaseOk && storageOk,
+      configured: true,
+      database: databaseOk,
+      storage: storageOk,
+    });
   });
 
   app.get('/api/files', async (_req: Request, res: Response) => {
-    const records = await runSerialized(() => readIndex());
-    const existing: InternalFileRecord[] = [];
-    let changed = false;
-
-    for (const record of records) {
-      const diskPath = resolveSafeUploadPath(record.storedName);
-      if (diskPath && fs.existsSync(diskPath)) {
-        existing.push(record);
-      } else {
-        changed = true;
-      }
+    const supabase = getSupabaseClient();
+    if (!supabase) {
+      res.status(503).json({
+        error: 'Supabase is not configured yet. Add SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY in Settings → Secrets.',
+        code: 'SUPABASE_NOT_CONFIGURED',
+      });
+      return;
     }
 
-    if (changed) {
-      await runSerialized(() => writeIndex(existing));
+    const {data, error} = await supabase
+      .from('files')
+      .select('id, original_name, storage_path, extension, size, mime_type, category, previewable, uploaded_at')
+      .order('uploaded_at', {ascending: false});
+
+    if (error) {
+      console.error('Supabase list error:', error.message);
+      res.status(502).json({error: 'Could not load files from Supabase. Verify your schema and policies.'});
+      return;
     }
 
-    const sorted = [...existing].sort(
-      (a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime(),
-    );
+    const rows = (data ?? []) as DbFileRow[];
+    const files = rows.map(toPublicItem);
+    const totalBytes = files.reduce((sum, item) => sum + item.size, 0);
 
-    const totalBytes = sorted.reduce((sum, item) => sum + item.size, 0);
     res.json({
-      files: sorted.map(toPublicItem),
+      files,
       totalBytes,
     });
   });
 
   app.post('/api/files/upload', upload.array('files', MAX_FILES_PER_UPLOAD), async (req: Request, res: Response) => {
     const uploadedFiles = req.files as Express.Multer.File[] | undefined;
-    if (!uploadedFiles || uploadedFiles.length === 0) {
-      res.status(400).json({error: 'No files were provided in the upload request.'});
-      return;
+    const supabase = getSupabaseClient();
+
+    const cleanupTempFiles = async () => {
+      if (!uploadedFiles) {
+        return;
+      }
+      await Promise.all(
+        uploadedFiles.map((file) => {
+          const resolved = path.resolve(file.path);
+          if (resolved.startsWith(TEMP_UPLOAD_DIR + path.sep)) {
+            return fsp.unlink(resolved).catch(() => undefined);
+          }
+          return Promise.resolve();
+        }),
+      );
+    };
+
+    try {
+      if (!supabase) {
+        res.status(503).json({
+          error: 'Supabase is not configured yet. Add SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY in Settings → Secrets.',
+          code: 'SUPABASE_NOT_CONFIGURED',
+        });
+        return;
+      }
+
+      if (!uploadedFiles || uploadedFiles.length === 0) {
+        res.status(400).json({error: 'No files were provided in the upload request.'});
+        return;
+      }
+
+      const createdItems = [];
+
+      for (const file of uploadedFiles) {
+        const resolvedTemp = path.resolve(file.path);
+        if (!resolvedTemp.startsWith(TEMP_UPLOAD_DIR + path.sep)) {
+          res.status(400).json({error: 'Invalid temporary upload path.'});
+          return;
+        }
+
+        const originalName = sanitizeOriginalFilename(file.originalname);
+        const rawExt = path.extname(originalName);
+        const ext = rawExt.replace(/^\./, '').toUpperCase().slice(0, 16) || 'FILE';
+        const mimeType = file.mimetype || 'application/octet-stream';
+        const category = inferCategory(mimeType, rawExt);
+        const previewable = isPreviewable(mimeType, rawExt);
+        const fileId = crypto.randomUUID();
+        const storagePath = fileId;
+
+        const buffer = await fsp.readFile(resolvedTemp);
+
+        const {error: storageError} = await supabase.storage
+          .from(BUCKET_NAME)
+          .upload(storagePath, buffer, {
+            contentType: mimeType,
+            upsert: false,
+          });
+
+        if (storageError) {
+          console.error('Supabase storage upload error:', storageError.message);
+          res.status(502).json({
+            error: `Failed to store "${originalName}" in Supabase Storage. Check bucket "${BUCKET_NAME}" policies.`,
+          });
+          return;
+        }
+
+        const {data: insertedRow, error: dbError} = await supabase
+          .from('files')
+          .insert({
+            id: fileId,
+            original_name: originalName,
+            storage_path: storagePath,
+            extension: ext,
+            size: file.size,
+            mime_type: mimeType,
+            category,
+            previewable,
+          })
+          .select('id, original_name, storage_path, extension, size, mime_type, category, previewable, uploaded_at')
+          .single();
+
+        if (dbError || !insertedRow) {
+          console.error('Supabase insert error:', dbError?.message);
+          res.status(502).json({
+            error: `Uploaded "${originalName}", but failed to save metadata in the files table.`,
+          });
+          return;
+        }
+
+        createdItems.push(toPublicItem(insertedRow as DbFileRow));
+      }
+
+      res.status(201).json({files: createdItems});
+    } finally {
+      await cleanupTempFiles();
     }
-
-    const now = new Date().toISOString();
-    const newRecords: InternalFileRecord[] = uploadedFiles.map((file) => {
-      const originalName = sanitizeOriginalFilename(file.originalname);
-      const ext = path.extname(originalName).replace(/^\./, '').toUpperCase().slice(0, 12);
-      const rawExt = path.extname(originalName);
-      const mimeType = file.mimetype || 'application/octet-stream';
-
-      return {
-        id: file.filename,
-        storedName: file.filename,
-        originalName,
-        extension: ext || 'FILE',
-        size: file.size,
-        mimeType,
-        category: inferCategory(mimeType, rawExt),
-        uploadedAt: now,
-        previewable: isPreviewable(mimeType, rawExt),
-      };
-    });
-
-    await runSerialized(async () => {
-      const current = await readIndex();
-      await writeIndex([...newRecords, ...current]);
-    });
-
-    res.status(201).json({
-      files: newRecords.map(toPublicItem),
-    });
   });
 
   app.get('/api/files/:id/download', async (req: Request, res: Response) => {
+    const supabase = getSupabaseClient();
+    if (!supabase) {
+      res.status(503).json({error: 'Supabase is not configured.'});
+      return;
+    }
+
     const id = String(req.params.id || '');
     if (!UUID_REGEX.test(id)) {
       res.status(400).json({error: 'Invalid file identifier.'});
       return;
     }
 
-    const records = await runSerialized(() => readIndex());
-    const record = records.find((item) => item.id === id);
-    if (!record) {
+    const {data: row, error: fetchError} = await supabase
+      .from('files')
+      .select('id, original_name, storage_path, extension, size, mime_type, category, previewable, uploaded_at')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (fetchError) {
+      console.error('Supabase fetch error:', fetchError.message);
+      res.status(502).json({error: 'Failed to look up file record.'});
+      return;
+    }
+
+    if (!row) {
       res.status(404).json({error: 'File not found.'});
       return;
     }
 
-    const filePath = resolveSafeUploadPath(record.storedName);
-    if (!filePath || !fs.existsSync(filePath)) {
-      res.status(404).json({error: 'File data missing from storage.'});
+    const record = row as DbFileRow;
+    const {data: blob, error: downloadError} = await supabase.storage
+      .from(BUCKET_NAME)
+      .download(record.storage_path);
+
+    if (downloadError || !blob) {
+      console.error('Supabase download error:', downloadError?.message);
+      res.status(404).json({error: 'File data not found in storage.'});
       return;
     }
 
+    const buffer = Buffer.from(await blob.arrayBuffer());
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('Content-Disposition', buildContentDisposition(record.originalName, 'attachment'));
-    res.setHeader('Content-Length', String(record.size));
-
-    const stream = fs.createReadStream(filePath);
-    stream.on('error', () => {
-      if (!res.headersSent) {
-        res.status(500).json({error: 'Failed to read file from storage.'});
-      }
-    });
-    stream.pipe(res);
+    res.setHeader('Content-Disposition', buildContentDisposition(record.original_name, 'attachment'));
+    res.setHeader('Content-Length', String(buffer.length));
+    res.send(buffer);
   });
 
   app.get('/api/files/:id/preview', async (req: Request, res: Response) => {
+    const supabase = getSupabaseClient();
+    if (!supabase) {
+      res.status(503).json({error: 'Supabase is not configured.'});
+      return;
+    }
+
     const id = String(req.params.id || '');
     if (!UUID_REGEX.test(id)) {
       res.status(400).json({error: 'Invalid file identifier.'});
       return;
     }
 
-    const records = await runSerialized(() => readIndex());
-    const record = records.find((item) => item.id === id);
+    const {data: row, error: fetchError} = await supabase
+      .from('files')
+      .select('id, original_name, storage_path, extension, size, mime_type, category, previewable, uploaded_at')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (fetchError) {
+      res.status(502).json({error: 'Failed to look up file record.'});
+      return;
+    }
+
+    const record = row as DbFileRow | null;
     if (!record || !record.previewable) {
       res.status(404).json({error: 'Preview unavailable for this file.'});
       return;
     }
 
-    const filePath = resolveSafeUploadPath(record.storedName);
-    if (!filePath || !fs.existsSync(filePath)) {
-      res.status(404).json({error: 'File data missing from storage.'});
+    const {data: blob, error: downloadError} = await supabase.storage
+      .from(BUCKET_NAME)
+      .download(record.storage_path);
+
+    if (downloadError || !blob) {
+      res.status(404).json({error: 'File data not found in storage.'});
       return;
     }
 
-    const lowerMime = record.mimeType.toLowerCase();
+    const lowerMime = record.mime_type.toLowerCase();
     const safeMime = SAFE_IMAGE_PREVIEW_MIMES.has(lowerMime)
       ? lowerMime
       : 'text/plain; charset=utf-8';
 
+    const buffer = Buffer.from(await blob.arrayBuffer());
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; img-src 'self'");
     res.setHeader('Content-Type', safeMime);
-    res.setHeader('Content-Disposition', buildContentDisposition(record.originalName, 'inline'));
-
-    const stream = fs.createReadStream(filePath);
-    stream.on('error', () => {
-      if (!res.headersSent) {
-        res.status(500).json({error: 'Failed to stream preview.'});
-      }
-    });
-    stream.pipe(res);
+    res.setHeader('Content-Disposition', buildContentDisposition(record.original_name, 'inline'));
+    res.setHeader('Content-Length', String(buffer.length));
+    res.send(buffer);
   });
 
-  app.delete('/api/files/:id', async (req: Request, res: Response) => {
-    const id = String(req.params.id || '');
-    if (!UUID_REGEX.test(id)) {
-      res.status(400).json({error: 'Invalid file identifier.'});
-      return;
-    }
-
-    const removed = await runSerialized(async () => {
-      const current = await readIndex();
-      const target = current.find((item) => item.id === id);
-      if (!target) {
-        return null;
-      }
-      const next = current.filter((item) => item.id !== id);
-      await writeIndex(next);
-      return target;
-    });
-
-    if (!removed) {
-      res.status(404).json({error: 'File not found.'});
-      return;
-    }
-
-    const filePath = resolveSafeUploadPath(removed.storedName);
-    if (filePath) {
-      await fsp.unlink(filePath).catch(() => undefined);
-    }
-
-    res.json({deletedId: id});
-  });
-
-  // Error handler for Multer & API routes
   app.use('/api', (err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof multer.MulterError) {
       if (err.code === 'LIMIT_FILE_SIZE') {
