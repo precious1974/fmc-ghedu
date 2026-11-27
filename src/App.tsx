@@ -3,6 +3,7 @@ import {
   Archive,
   Check,
   Download,
+  ExternalLink,
   Eye,
   File as FileIcon,
   FileText,
@@ -381,6 +382,35 @@ export default function App() {
       </header>
 
       <main className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
+        {/* Top External File Link */}
+        <div className="mb-6 flex items-center justify-between gap-4 rounded-xl border border-zinc-200 bg-white px-4 py-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="text-xs font-medium text-zinc-500 whitespace-nowrap shrink-0">
+              Featured Link
+            </span>
+            <span aria-hidden="true" className="text-zinc-300">
+              ·
+            </span>
+            <a
+              href="https://mega.nz/file/wQcQ3DhQ#gYIQT_xbpAn3KwVVToUPDULfI6ML7Sop9FGW0IQzXYE"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="truncate font-mono text-xs text-blue-600 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+            >
+              https://mega.nz/file/wQcQ3DhQ#gYIQT_xbpAn3KwVVToUPDULfI6ML7Sop9FGW0IQzXYE
+            </a>
+          </div>
+          <a
+            href="https://mega.nz/file/wQcQ3DhQ#gYIQT_xbpAn3KwVVToUPDULfI6ML7Sop9FGW0IQzXYE"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-800 transition-colors hover:bg-zinc-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 whitespace-nowrap shrink-0"
+          >
+            <span>Open Link</span>
+            <ExternalLink className="h-3.5 w-3.5 text-zinc-500" aria-hidden="true" />
+          </a>
+        </div>
+
         {/* Upload Dropzone */}
         <section aria-label="Upload files">
           <div
