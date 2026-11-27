@@ -426,6 +426,10 @@ async function startServer(): Promise<void> {
     res.send(buffer);
   });
 
+  app.use('/api', (req: Request, res: Response) => {
+    res.status(404).json({error: `API route not found: ${req.method} ${req.originalUrl}`});
+  });
+
   app.use('/api', (err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof multer.MulterError) {
       if (err.code === 'LIMIT_FILE_SIZE') {

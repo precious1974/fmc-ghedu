@@ -71,10 +71,13 @@ export default function App() {
 
   const fetchFiles = useCallback(async () => {
     try {
-      const response = await fetch('/api/files', {cache: 'no-store'});
+      const response = await fetch('/api/files', {
+        cache: 'no-store',
+        credentials: 'same-origin',
+      });
       if (!response.ok) {
         const body = (await response.json().catch(() => null)) as {error?: string} | null;
-        throw new Error(body?.error || 'Could not load stored files.');
+        throw new Error(body?.error || `Could not load stored files (HTTP ${response.status}).`);
       }
       const data: FileListResponse = await response.json();
       setFiles(data.files);
@@ -125,6 +128,7 @@ export default function App() {
 
       const xhr = new XMLHttpRequest();
       xhr.open('POST', '/api/files/upload');
+      xhr.withCredentials = true;
 
       xhr.upload.onprogress = (event) => {
         if (event.lengthComputable && event.total > 0) {
