@@ -8,6 +8,7 @@ import {
   FileText,
   Film,
   Image as ImageIcon,
+  RefreshCw,
   Search,
   Upload,
   X,
@@ -70,7 +71,7 @@ export default function App() {
 
   const fetchFiles = useCallback(async () => {
     try {
-      const response = await fetch('/api/files');
+      const response = await fetch('/api/files', {cache: 'no-store'});
       if (!response.ok) {
         const body = (await response.json().catch(() => null)) as {error?: string} | null;
         throw new Error(body?.error || 'Could not load stored files.');
@@ -144,24 +145,28 @@ export default function App() {
             const payload = JSON.parse(xhr.responseText) as {files?: StoredFileItem[]};
             const uploaded = payload.files ?? [];
             if (uploaded.length > 0) {
-              setFiles((prev) => [...uploaded, ...prev]);
+              setFiles((prev) => {
+                const existingIds = new Set(uploaded.map((u) => u.id));
+                return [...uploaded, ...prev.filter((item) => !existingIds.has(item.id))];
+              });
               setNoticeMessage(
                 uploaded.length === 1
                   ? `Stored "${uploaded[0].originalName}" permanently.`
                   : `Stored ${uploaded.length} files permanently.`,
               );
-            } else {
-              void fetchFiles();
             }
           } catch {
-            void fetchFiles();
+            // Fall through to authoritative refetch
           }
+          void fetchFiles();
+        } else if (xhr.status === 413) {
+          setErrorMessage('File exceeds the 32 MB upload limit.');
         } else {
           try {
             const errBody = JSON.parse(xhr.responseText) as {error?: string};
             setErrorMessage(errBody.error || 'Upload failed.');
           } catch {
-            setErrorMessage('Upload failed. Please check file size and try again.');
+            setErrorMessage(`Upload failed (HTTP ${xhr.status}). Please try again.`);
           }
         }
       };
@@ -171,16 +176,25 @@ export default function App() {
         setErrorMessage('Network error while uploading. Please try again.');
       };
 
+      xhr.onabort = () => {
+        setUploadProgress(null);
+      };
+
       xhr.send(formData);
     },
     [fetchFiles, uploadProgress],
   );
 
   const handleFileInputChange = (event: ChangeEvent<HTMLInputElement>) => {
-    if (event.target.files && event.target.files.length > 0) {
-      uploadFiles(event.target.files);
+    const selected = event.target.files;
+    if (selected && selected.length > 0) {
+      uploadFiles(Array.from(selected));
     }
-    event.target.value = '';
+    window.setTimeout(() => {
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }, 0);
   };
 
   const handleDragEnter = (event: DragEvent<HTMLDivElement>) => {
@@ -555,6 +569,16 @@ export default function App() {
                 <option value="name">Name A–Z</option>
                 <option value="size">Largest first</option>
               </select>
+
+              <button
+                type="button"
+                onClick={() => void fetchFiles()}
+                aria-label="Refresh file list"
+                title="Refresh"
+                className="inline-flex h-[40px] w-[40px] items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-600 transition-colors hover:bg-zinc-50 hover:text-zinc-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 shrink-0"
+              >
+                <RefreshCw className="h-4 w-4" aria-hidden="true" />
+              </button>
             </div>
           </div>
 

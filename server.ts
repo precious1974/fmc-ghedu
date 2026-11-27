@@ -169,6 +169,7 @@ async function startServer(): Promise<void> {
   app.use(express.json());
 
   app.get('/api/health', async (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store');
     const supabase = getSupabaseClient();
     if (!supabase) {
       res.status(503).json({ok: false, configured: false, database: false, storage: false});
@@ -192,6 +193,7 @@ async function startServer(): Promise<void> {
   });
 
   app.get('/api/files', async (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store');
     const supabase = getSupabaseClient();
     if (!supabase) {
       res.status(503).json({
@@ -222,7 +224,7 @@ async function startServer(): Promise<void> {
     });
   });
 
-  app.post('/api/files/upload', upload.array('files', MAX_FILES_PER_UPLOAD), async (req: Request, res: Response) => {
+  app.post('/api/files/upload', upload.any(), async (req: Request, res: Response) => {
     const uploadedFiles = req.files as Express.Multer.File[] | undefined;
     const supabase = getSupabaseClient();
 
@@ -285,7 +287,7 @@ async function startServer(): Promise<void> {
         if (storageError) {
           console.error('Supabase storage upload error:', storageError.message);
           res.status(502).json({
-            error: `Failed to store "${originalName}" in Supabase Storage. Check bucket "${BUCKET_NAME}" policies.`,
+            error: `Failed to store "${originalName}" in Supabase Storage: ${storageError.message}`,
           });
           return;
         }
@@ -308,7 +310,7 @@ async function startServer(): Promise<void> {
         if (dbError || !insertedRow) {
           console.error('Supabase insert error:', dbError?.message);
           res.status(502).json({
-            error: `Uploaded "${originalName}", but failed to save metadata in the files table.`,
+            error: `Uploaded "${originalName}", but failed to save metadata in the files table: ${dbError?.message ?? 'unknown error'}`,
           });
           return;
         }
