@@ -1,0 +1,6 @@
+{
+  "name": "PocketVault",
+  "description": "A simple, fast web app to upload, organize, preview, and download files.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
